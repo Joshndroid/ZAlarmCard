@@ -503,3 +503,12 @@ const CSS = `
 `;
 
 customElements.define('zalarmclock-card', ZAlarmClockCard);
+
+// Tell Home Assistant this card exists so it appears in the card picker
+window.customCards = window.customCards || [];
+window.customCards.push({
+  type:        'zalarmclock-card',
+  name:        'ZAlarmClock Card',
+  description: 'Flip clock alarm card for the ZAlarmClock ESPHome device.',
+  preview:     false,
+});
