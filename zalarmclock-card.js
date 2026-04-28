@@ -253,6 +253,8 @@ const HTML = (title) => `
 // ── CSS ───────────────────────────────────────────────────
 
 const CSS = `
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap');
+
   ha-card {
     background: #080808 !important;
     border-radius: 14px;
@@ -261,7 +263,7 @@ const CSS = `
   }
   .card {
     padding: 20px 18px 18px;
-    font-family: 'Roboto Mono', 'Courier New', monospace;
+    font-family: 'JetBrains Mono', 'Courier New', monospace;
     color: #ffcc00;
     box-sizing: border-box;
   }
