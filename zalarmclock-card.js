@@ -31,8 +31,8 @@ class ZAlarmClockCard extends HTMLElement {
     this._rendered    = false;
     this._alarmHour   = null;
     this._alarmMinute = null;
-    this._pending     = { hour: false, minute: false, switch: false };
-    this._pushTimers  = { hour: null, minute: null };
+    this._dirty       = false;
+    this._syncing     = false;
   }
 
   // ── Lovelace lifecycle ─────────────────────────────────
@@ -112,20 +112,21 @@ class ZAlarmClockCard extends HTMLElement {
     const minSt    = hass.states[cfg.alarm_minute_entity];
     const switchSt = hass.states[cfg.alarm_switch_entity];
 
-    if (hourSt && !this._pending.hour) {
+    if (hourSt && !this._dirty && !this._syncing) {
       this._alarmHour = clampInt(hourSt.state, 0, 23, 7);
     }
-    if (minSt && !this._pending.minute) {
+    if (minSt && !this._dirty && !this._syncing) {
       this._alarmMinute = clampInt(minSt.state, 0, 59, 0);
     }
     this._updateAlarmDigits();
 
     if (switchSt) {
       const isOn  = switchSt.state === 'on';
-      const tog   = root.querySelector('#alarm-toggle');
-      const badge = root.querySelector('#alarm-badge');
-      if (tog && !this._pending.switch) tog.checked = isOn;
-      if (badge) { badge.textContent = isOn ? 'ARMED' : 'OFF'; badge.className = `badge ${isOn ? 'armed' : 'off'}`; }
+      if (!this._dirty && !this._syncing) {
+        const tog = root.querySelector('#alarm-toggle');
+        if (tog) tog.checked = isOn;
+      }
+      this._updateAlarmState(isOn);
     }
   }
 
@@ -135,11 +136,31 @@ class ZAlarmClockCard extends HTMLElement {
     const minEl = root.querySelector('#alarm-min');
     if (hourEl && this._alarmHour != null) {
       hourEl.textContent = pad(this._alarmHour);
-      hourEl.classList.toggle('pending', this._pending.hour);
+      hourEl.classList.toggle('pending', this._dirty || this._syncing);
     }
     if (minEl && this._alarmMinute != null) {
       minEl.textContent = pad(this._alarmMinute);
-      minEl.classList.toggle('pending', this._pending.minute);
+      minEl.classList.toggle('pending', this._dirty || this._syncing);
+    }
+  }
+
+  _updateAlarmState(haIsOn = false) {
+    const root = this.shadowRoot;
+    const tog = root.querySelector('#alarm-toggle');
+    const badge = root.querySelector('#alarm-badge');
+    if (this._dirty) {
+      if (tog) tog.checked = false;
+      if (badge) { badge.textContent = 'OFF'; badge.className = 'badge off'; }
+      return;
+    }
+    if (this._syncing) {
+      if (tog) tog.checked = true;
+      if (badge) { badge.textContent = 'SYNC'; badge.className = 'badge sync'; }
+      return;
+    }
+    if (badge) {
+      badge.textContent = haIsOn ? 'ARMED' : 'OFF';
+      badge.className = `badge ${haIsOn ? 'armed' : 'off'}`;
     }
   }
 
@@ -155,9 +176,7 @@ class ZAlarmClockCard extends HTMLElement {
       this._alarmHour = clampInt(st?.state, 0, 23, 7);
     }
     this._alarmHour = wrap(this._alarmHour + d, 24);
-    this._pending.hour = true;
-    this._updateAlarmDigits();
-    this._scheduleNumberPush('hour', this._config.alarm_hour_entity, this._alarmHour);
+    this._markDirty();
   }
 
   _adjustMinute(d) {
@@ -166,26 +185,36 @@ class ZAlarmClockCard extends HTMLElement {
       this._alarmMinute = clampInt(st?.state, 0, 59, 0);
     }
     this._alarmMinute = wrap(this._alarmMinute + d, 60);
-    this._pending.minute = true;
-    this._updateAlarmDigits();
-    this._scheduleNumberPush('minute', this._config.alarm_minute_entity, this._alarmMinute);
+    this._markDirty();
   }
 
-  _scheduleNumberPush(kind, entityId, value) {
-    clearTimeout(this._pushTimers[kind]);
-    this._pushTimers[kind] = setTimeout(async () => {
-      try {
-        await this._svc('number', 'set_value', entityId, { value: Number(value) });
-        this._pending[kind] = false;
-      } catch (err) {
-        console.error(`ZAlarmClock: failed to set ${kind}`, err);
-        this._pending[kind] = false;
-        const st = this._hass?.states[entityId];
-        if (kind === 'hour') this._alarmHour = clampInt(st?.state, 0, 23, 7);
-        if (kind === 'minute') this._alarmMinute = clampInt(st?.state, 0, 59, 0);
-      }
+  _markDirty() {
+    this._dirty = true;
+    this._syncing = false;
+    this._updateAlarmDigits();
+    this._updateAlarmState(false);
+  }
+
+  async _commitAndEnable() {
+    if (this._alarmHour == null || this._alarmMinute == null) return;
+    this._dirty = false;
+    this._syncing = true;
+    this._updateAlarmDigits();
+    this._updateAlarmState(false);
+    try {
+      await this._svc('number', 'set_value', this._config.alarm_hour_entity,
+                      { value: Number(this._alarmHour) });
+      await this._svc('number', 'set_value', this._config.alarm_minute_entity,
+                      { value: Number(this._alarmMinute) });
+      await this._svc('switch', 'turn_on', this._config.alarm_switch_entity);
+    } catch (err) {
+      console.error('ZAlarmClock: failed to sync alarm', err);
+      this._dirty = true;
+    } finally {
+      this._syncing = false;
       this._updateAlarmDigits();
-    }, 350);
+      this._syncAlarm();
+    }
   }
 
   // ── Button binding (with hold-to-repeat) ──────────────
@@ -199,19 +228,21 @@ class ZAlarmClockCard extends HTMLElement {
     this._pressRepeat(r.querySelector('#m-dn'), () => this._adjustMinute(-1));
 
     r.querySelector('#alarm-toggle').addEventListener('change', async (e) => {
-      this._pending.switch = true;
       const checked = e.target.checked;
       try {
-        await this._svc('switch', checked ? 'turn_on' : 'turn_off',
-                        this._config.alarm_switch_entity);
+        if (checked) {
+          await this._commitAndEnable();
+        } else {
+          this._dirty = false;
+          this._syncing = false;
+          await this._svc('switch', 'turn_off', this._config.alarm_switch_entity);
+        }
       } catch (err) {
         console.error('ZAlarmClock: failed to toggle alarm', err);
         const st = this._hass?.states[this._config.alarm_switch_entity];
         e.target.checked = st?.state === 'on';
-      } finally {
-        this._pending.switch = false;
-        this._syncAlarm();
       }
+      this._syncAlarm();
     });
 
     r.querySelector('#dismiss').addEventListener('click', () =>
@@ -489,6 +520,7 @@ const CSS = `
   }
   .badge.armed { background: #112218; color: #44ff99; border: 1px solid #1e4430; }
   .badge.off   { background: #111118; color: #444455; border: 1px solid #222233; }
+  .badge.sync  { background: #1e1a08; color: #ffcc00; border: 1px solid #5a4a18; }
 
   /* ── Alarm time setter ── */
   .setter-row {
