@@ -29,6 +29,10 @@ class ZAlarmClockCard extends HTMLElement {
     this._prevHour    = null;
     this._prevMinute  = null;
     this._rendered    = false;
+    this._alarmHour   = null;
+    this._alarmMinute = null;
+    this._pending     = { hour: false, minute: false, switch: false };
+    this._pushTimers  = { hour: null, minute: null };
   }
 
   // ── Lovelace lifecycle ─────────────────────────────────
@@ -108,41 +112,80 @@ class ZAlarmClockCard extends HTMLElement {
     const minSt    = hass.states[cfg.alarm_minute_entity];
     const switchSt = hass.states[cfg.alarm_switch_entity];
 
-    if (hourSt) {
-      const el = root.querySelector('#alarm-hour');
-      if (el) el.textContent = pad(Math.round(+hourSt.state));
+    if (hourSt && !this._pending.hour) {
+      this._alarmHour = clampInt(hourSt.state, 0, 23, 7);
     }
-    if (minSt) {
-      const el = root.querySelector('#alarm-min');
-      if (el) el.textContent = pad(Math.round(+minSt.state));
+    if (minSt && !this._pending.minute) {
+      this._alarmMinute = clampInt(minSt.state, 0, 59, 0);
     }
+    this._updateAlarmDigits();
+
     if (switchSt) {
       const isOn  = switchSt.state === 'on';
       const tog   = root.querySelector('#alarm-toggle');
       const badge = root.querySelector('#alarm-badge');
-      if (tog)   tog.checked     = isOn;
+      if (tog && !this._pending.switch) tog.checked = isOn;
       if (badge) { badge.textContent = isOn ? 'ARMED' : 'OFF'; badge.className = `badge ${isOn ? 'armed' : 'off'}`; }
+    }
+  }
+
+  _updateAlarmDigits() {
+    const root = this.shadowRoot;
+    const hourEl = root.querySelector('#alarm-hour');
+    const minEl = root.querySelector('#alarm-min');
+    if (hourEl && this._alarmHour != null) {
+      hourEl.textContent = pad(this._alarmHour);
+      hourEl.classList.toggle('pending', this._pending.hour);
+    }
+    if (minEl && this._alarmMinute != null) {
+      minEl.textContent = pad(this._alarmMinute);
+      minEl.classList.toggle('pending', this._pending.minute);
     }
   }
 
   // ── Service calls ──────────────────────────────────────
 
   _svc(domain, service, entity_id, extra = {}) {
-    this._hass?.callService(domain, service, { entity_id, ...extra });
+    return this._hass?.callService(domain, service, { entity_id, ...extra });
   }
 
   _adjustHour(d) {
-    const st = this._hass?.states[this._config.alarm_hour_entity];
-    if (!st) return;
-    this._svc('number', 'set_value', this._config.alarm_hour_entity,
-              { value: (Math.round(+st.state) + d + 24) % 24 });
+    if (this._alarmHour == null) {
+      const st = this._hass?.states[this._config.alarm_hour_entity];
+      this._alarmHour = clampInt(st?.state, 0, 23, 7);
+    }
+    this._alarmHour = wrap(this._alarmHour + d, 24);
+    this._pending.hour = true;
+    this._updateAlarmDigits();
+    this._scheduleNumberPush('hour', this._config.alarm_hour_entity, this._alarmHour);
   }
 
   _adjustMinute(d) {
-    const st = this._hass?.states[this._config.alarm_minute_entity];
-    if (!st) return;
-    this._svc('number', 'set_value', this._config.alarm_minute_entity,
-              { value: (Math.round(+st.state) + d + 60) % 60 });
+    if (this._alarmMinute == null) {
+      const st = this._hass?.states[this._config.alarm_minute_entity];
+      this._alarmMinute = clampInt(st?.state, 0, 59, 0);
+    }
+    this._alarmMinute = wrap(this._alarmMinute + d, 60);
+    this._pending.minute = true;
+    this._updateAlarmDigits();
+    this._scheduleNumberPush('minute', this._config.alarm_minute_entity, this._alarmMinute);
+  }
+
+  _scheduleNumberPush(kind, entityId, value) {
+    clearTimeout(this._pushTimers[kind]);
+    this._pushTimers[kind] = setTimeout(async () => {
+      try {
+        await this._svc('number', 'set_value', entityId, { value: Number(value) });
+        this._pending[kind] = false;
+      } catch (err) {
+        console.error(`ZAlarmClock: failed to set ${kind}`, err);
+        this._pending[kind] = false;
+        const st = this._hass?.states[entityId];
+        if (kind === 'hour') this._alarmHour = clampInt(st?.state, 0, 23, 7);
+        if (kind === 'minute') this._alarmMinute = clampInt(st?.state, 0, 59, 0);
+      }
+      this._updateAlarmDigits();
+    }, 350);
   }
 
   // ── Button binding (with hold-to-repeat) ──────────────
@@ -155,9 +198,21 @@ class ZAlarmClockCard extends HTMLElement {
     this._pressRepeat(r.querySelector('#m-up'), () => this._adjustMinute(1));
     this._pressRepeat(r.querySelector('#m-dn'), () => this._adjustMinute(-1));
 
-    r.querySelector('#alarm-toggle').addEventListener('change', (e) =>
-      this._svc('switch', e.target.checked ? 'turn_on' : 'turn_off',
-                this._config.alarm_switch_entity));
+    r.querySelector('#alarm-toggle').addEventListener('change', async (e) => {
+      this._pending.switch = true;
+      const checked = e.target.checked;
+      try {
+        await this._svc('switch', checked ? 'turn_on' : 'turn_off',
+                        this._config.alarm_switch_entity);
+      } catch (err) {
+        console.error('ZAlarmClock: failed to toggle alarm', err);
+        const st = this._hass?.states[this._config.alarm_switch_entity];
+        e.target.checked = st?.state === 'on';
+      } finally {
+        this._pending.switch = false;
+        this._syncAlarm();
+      }
+    });
 
     r.querySelector('#dismiss').addEventListener('click', () =>
       this._svc('button', 'press', this._config.dismiss_entity));
@@ -221,6 +276,12 @@ class ZAlarmClockCard extends HTMLElement {
 // ── Helpers ───────────────────────────────────────────────
 
 const pad = (n) => String(n).padStart(2, '0');
+const wrap = (n, max) => ((n % max) + max) % max;
+const clampInt = (value, min, max, fallback) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(parsed)));
+};
 
 // ── HTML template ─────────────────────────────────────────
 
@@ -458,6 +519,11 @@ const CSS = `
     letter-spacing: -2px;
     user-select: none;
     transition: background 0.15s;
+  }
+  .alarm-digit.pending {
+    background: #1c1c22;
+    border-color: #5a4a18;
+    box-shadow: inset 0 0 0 1px rgba(255, 204, 0, 0.18);
   }
   .adj {
     width: 100px;
