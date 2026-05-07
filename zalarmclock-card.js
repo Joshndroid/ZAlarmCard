@@ -15,6 +15,8 @@
 //    alarm_minute_entity: number.zalarmclock_alarm_minute
 //    alarm_switch_entity: switch.zalarmclock_alarm_enabled
 //    dismiss_entity:      button.zalarmclock_dismiss_alarm
+//    reboot_entity:       button.zalarmclock_reboot_device
+//    safe_mode_entity:    button.zalarmclock_boot_safe_mode
 // ═══════════════════════════════════════════════════════════
 
 class ZAlarmClockCard extends HTMLElement {
@@ -38,6 +40,8 @@ class ZAlarmClockCard extends HTMLElement {
       alarm_minute_entity: config.alarm_minute_entity ?? 'number.zalarmclock_alarm_minute',
       alarm_switch_entity: config.alarm_switch_entity ?? 'switch.zalarmclock_alarm_enabled',
       dismiss_entity:      config.dismiss_entity      ?? 'button.zalarmclock_dismiss_alarm',
+      reboot_entity:       config.reboot_entity       ?? 'button.zalarmclock_reboot_device',
+      safe_mode_entity:    config.safe_mode_entity    ?? 'button.zalarmclock_boot_safe_mode',
     };
     this._build();
   }
@@ -49,7 +53,7 @@ class ZAlarmClockCard extends HTMLElement {
 
   connectedCallback()    { this._startClock(); }
   disconnectedCallback() { clearInterval(this._clockTimer); }
-  getCardSize()          { return 6; }
+  getCardSize()          { return 7; }
 
   // ── Build DOM ──────────────────────────────────────────
 
@@ -157,6 +161,34 @@ class ZAlarmClockCard extends HTMLElement {
 
     r.querySelector('#dismiss').addEventListener('click', () =>
       this._svc('button', 'press', this._config.dismiss_entity));
+
+    this._confirmBtn(r.querySelector('#reboot'),    this._config.reboot_entity,    '↺ REBOOT');
+    this._confirmBtn(r.querySelector('#safe-mode'), this._config.safe_mode_entity, '⛨ SAFE MODE');
+  }
+
+  // Two-tap confirmation: first tap shows "CONFIRM?" for 2 s,
+  // second tap within that window actually calls the service.
+  _confirmBtn(el, entityId, label) {
+    if (!el) return;
+    let timer = null;
+    el.addEventListener('click', () => {
+      if (el.dataset.confirming === 'true') {
+        clearTimeout(timer);
+        el.dataset.confirming = 'false';
+        el.textContent = label;
+        el.classList.remove('confirming');
+        this._svc('button', 'press', entityId);
+      } else {
+        el.dataset.confirming = 'true';
+        el.textContent = 'CONFIRM?';
+        el.classList.add('confirming');
+        timer = setTimeout(() => {
+          el.dataset.confirming = 'false';
+          el.textContent = label;
+          el.classList.remove('confirming');
+        }, 2000);
+      }
+    });
   }
 
   // Tap = single step. Hold 500ms = rapid repeat every 150ms.
@@ -246,6 +278,17 @@ const HTML = (title) => `
   </label>
 
   <button class="dismiss-btn" id="dismiss">DISMISS ALARM</button>
+
+  <div class="divider" style="margin-top:18px"></div>
+
+  <!-- ── Device controls ── -->
+  <div class="alarm-header">
+    <span class="alarm-lbl">DEVICE</span>
+  </div>
+  <div class="device-row">
+    <button class="device-btn reboot-btn" id="reboot">↺ REBOOT</button>
+    <button class="device-btn safe-btn"   id="safe-mode">⛨ SAFE MODE</button>
+  </div>
 
 </div>
 </ha-card>`;
@@ -502,6 +545,39 @@ const CSS = `
   }
   .dismiss-btn:hover  { background: #200c0c; }
   .dismiss-btn:active { background: #2e1010; transform: scale(0.99); }
+
+  /* ── Device controls ── */
+  .device-row {
+    display: flex;
+    gap: 10px;
+  }
+  .device-btn {
+    flex: 1;
+    padding: 11px 6px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    cursor: pointer;
+    transition: background 0.15s, transform 0.08s, color 0.15s;
+    font-family: inherit;
+  }
+  .device-btn:active { transform: scale(0.97); }
+  .device-btn.confirming { letter-spacing: 0.5px; }
+  .reboot-btn {
+    background: #0E0E20;
+    border: 1px solid #2A2A50;
+    color: #7777BB;
+  }
+  .reboot-btn:hover { background: #16162E; }
+  .reboot-btn.confirming { background: #1A1A40; color: #AAAAEE; border-color: #4444AA; }
+  .safe-btn {
+    background: #0D1A0D;
+    border: 1px solid #1E3A1E;
+    color: #448844;
+  }
+  .safe-btn:hover { background: #122012; }
+  .safe-btn.confirming { background: #0D2A0D; color: #66CC66; border-color: #2A6A2A; }
 `;
 
 customElements.define('zalarmclock-card', ZAlarmClockCard);
